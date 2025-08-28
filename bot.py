@@ -14,13 +14,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========== КОНФИГУРАЦИЯ (ОБЯЗАТЕЛЬНО ЗАПОЛНИТЕ!) ==========
-BOT_TOKEN = "ВСТАВЬТЕ_СЮДА_ТОКЕН_ОТ_BOTFATHER"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # ID администраторов (получить можно у @userinfobot)
-ADMIN_IDS = [
-    123456789,  # Замените на реальный ID первого админа
-    987654321   # Замените на реальный ID второго админа
-]
+ADMIN_IDS = [int(os.getenv("ADMIN_ID1")), int(os.getenv("ADMIN_ID2"))]
 
 # ID канала/группы где работает бот (получить можно добавив бота в канал)
 CHANNEL_ID = -1001234567890  # Замените на реальный ID канала

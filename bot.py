@@ -1,523 +1,629 @@
-import logging
-import json
 import os
+import json
+import logging
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ParseMode, ChatType
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # Настройка логирования
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# КОНФИГУРАЦИЯ
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [int(os.getenv("ADMIN_ID1", "0")), int(os.getenv("ADMIN_ID2", "0"))]
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
+# Получение токена и админов из переменных окружения
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_IDS = list(map(int, os.getenv('ADMIN_IDS', '').split(','))) if os.getenv('ADMIN_IDS') else []
 
-# ФАЙЛЫ
-PLANTS_FILE = "plants.json"
-BOOKINGS_FILE = "bookings.json"
+# Состояния для машины состояний
+WAITING_PLANT_NAME = 'waiting_plant_name'
+WAITING_PLANT_DESCRIPTION = 'waiting_plant_description'
+WAITING_PLANT_PRICE = 'waiting_plant_price'
+WAITING_PLANT_QUANTITY = 'waiting_plant_quantity'
+WAITING_PLANT_PHOTO = 'waiting_plant_photo'
+WAITING_BOOKING_NAME = 'waiting_booking_name'
+WAITING_BOOKING_PHONE = 'waiting_booking_phone'
 
-# СОСТОЯНИЯ (простые, без ConversationHandler)
+# Глобальное хранилище состояний пользователей
 user_states = {}
+temp_plant_data = {}
+temp_booking_data = {}
+
+def load_json_file(filename):
+    """Загрузка данных из JSON файла с обработкой ошибок"""
+    try:
+        if os.path.exists(filename):
+            with open(filename, 'r', encoding='utf-8') as file:
+                return json.load(file)
+        return {}
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        logger.error(f"Ошибка загрузки файла {filename}: {e}")
+        return {}
+
+def save_json_file(filename, data):
+    """Сохранение данных в JSON файл с обработкой ошибок"""
+    try:
+        with open(filename, 'w', encoding='utf-8') as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения файла {filename}: {e}")
+        return False
 
 def load_plants():
-    if os.path.exists(PLANTS_FILE):
-        with open(PLANTS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+    """Загрузка списка растений"""
+    return load_json_file('plants.json')
 
 def save_plants(plants):
-    with open(PLANTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(plants, f, ensure_ascii=False, indent=2)
+    """Сохранение списка растений"""
+    return save_json_file('plants.json', plants)
 
 def load_bookings():
-    if os.path.exists(BOOKINGS_FILE):
-        with open(BOOKINGS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+    """Загрузка списка бронирований"""
+    return load_json_file('bookings.json')
 
 def save_bookings(bookings):
-    with open(BOOKINGS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(bookings, f, ensure_ascii=False, indent=2)
-
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
+    """Сохранение списка бронирований"""
+    return save_json_file('bookings.json', bookings)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start"""
-    chat_type = update.effective_chat.type
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id if update.effective_user else None
+    """Обработчик команды /start"""
+    user_id = update.effective_user.id
     
-    logger.info(f"/start от {user_id} в {chat_type} {chat_id}")
+    # Очистка состояния пользователя
+    if user_id in user_states:
+        del user_states[user_id]
+    if user_id in temp_plant_data:
+        del temp_plant_data[user_id]
+    if user_id in temp_booking_data:
+        del temp_booking_data[user_id]
     
-    if chat_type == ChatType.CHANNEL:
-        logger.info(f"🔥 ID КАНАЛА: {chat_id}")
+    # Создание клавиатуры
+    if user_id in ADMIN_IDS:
+        keyboard = [
+            [KeyboardButton("📱 Каталог растений")],
+            [KeyboardButton("➕ Добавить растение"), KeyboardButton("❌ Удалить растение")],
+            [KeyboardButton("📋 Управление заказами")]
+        ]
+    else:
+        keyboard = [
+            [KeyboardButton("📱 Каталог растений")]
+        ]
     
-    # Проверяем deep link для бронирования
-    if chat_type == ChatType.PRIVATE and context.args:
-        param = context.args[0]
-        if param.startswith("book_"):
-            plant_id = param.replace("book_", "")
-            await start_booking(update, context, plant_id)
-            return
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
-    # Показываем каталог
-    await show_catalog(update, context)
+    welcome_msg = "🌸 Добро пожаловать в магазин цветов Polly's Garden!\n\n"
+    if user_id in ADMIN_IDS:
+        welcome_msg += "Вы вошли как администратор."
+    else:
+        welcome_msg += "Выберите действие из меню ниже:"
+    
+    await update.message.reply_text(welcome_msg, reply_markup=reply_markup)
 
 async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает каталог растений"""
+    """Показ каталога растений"""
     plants = load_plants()
-    bookings = load_bookings()
-    
-    text = "🌱 **КАТАЛОГ РАСТЕНИЙ**\n\n"
-    keyboard = []
     
     if not plants:
-        text += "😔 Растений пока нет в наличии."
-    else:
-        available = 0
-        for plant_id, plant in plants.items():
-            if plant_id not in bookings:  # Не забронировано
-                keyboard.append([InlineKeyboardButton(
-                    f"🪴 {plant['name']} - {plant['price']}", 
-                    callback_data=f"plant_{plant_id}"
-                )])
-                available += 1
-        
-        if available == 0:
-            text += "🔒 Все растения сейчас забронированы."
-        else:
-            text += f"Доступно: **{available}** растений\n\nВыберите для подробностей:"
-    
-    # Админские кнопки
-    if update.effective_user and is_admin(update.effective_user.id):
-        keyboard.append([InlineKeyboardButton("➕ Добавить растение", callback_data="admin_add")])
-        keyboard.append([InlineKeyboardButton("📋 Брони", callback_data="admin_bookings")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    
-    # Отправляем сообщение
-    if update.callback_query:
-        # Безопасное редактирование
-        try:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-        except:
-            # Если не получается редактировать - удаляем и отправляем новое
-            try:
-                await update.callback_query.message.delete()
-            except:
-                pass
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN
-            )
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-
-async def show_plant(update: Update, context: ContextTypes.DEFAULT_TYPE, plant_id: str):
-    """Показывает детали растения"""
-    query = update.callback_query
-    plants = load_plants()
-    bookings = load_bookings()
-    
-    if plant_id not in plants:
-        await query.edit_message_text("❌ Растение не найдено")
+        await update.message.reply_text("🌱 Каталог пуст. Растения пока не добавлены.")
         return
     
-    plant = plants[plant_id]
-    is_booked = plant_id in bookings
-    
-    text = f"🪴 **{plant['name']}**\n\n"
-    text += f"💰 Цена: **{plant['price']}**\n\n"
-    text += f"📝 {plant['description']}\n\n"
-    
+    # Создание инлайн-клавиатуры с растениями
     keyboard = []
-    
-    if is_booked:
-        text += "🔒 **ЗАБРОНИРОВАНО**"
-    else:
-        text += "✅ **ДОСТУПНО**"
-        keyboard.append([InlineKeyboardButton("📞 Забронировать", callback_data=f"book_{plant_id}")])
-    
-    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_catalog")])
-    
-    # Админские кнопки
-    if update.effective_user and is_admin(update.effective_user.id):
-        keyboard.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"delete_{plant_id}")])
+    for plant_id, plant_data in plants.items():
+        availability = "✅" if plant_data.get('quantity', 0) > 0 else "❌"
+        button_text = f"{availability} {plant_data['name']} - {plant_data['price']}₽"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"plant_{plant_id}")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # Безопасное редактирование
-    try:
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-    except:
-        try:
-            await query.message.delete()
-        except:
-            pass
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-async def handle_booking_button(update: Update, context: ContextTypes.DEFAULT_TYPE, plant_id: str):
-    """Обрабатывает кнопку бронирования"""
-    query = update.callback_query
-    plants = load_plants()
-    
-    if plant_id not in plants:
-        await query.edit_message_text("❌ Растение не найдено")
-        return
-    
-    plant_name = plants[plant_id]['name']
-    bot_username = context.bot.username
-    
-    # Ссылка для перехода в личку
-    bot_link = f"https://t.me/{bot_username}?start=book_{plant_id}"
-    
-    keyboard = [
-        [InlineKeyboardButton("📞 Перейти к бронированию", url=bot_link)],
-        [InlineKeyboardButton("⬅️ Назад", callback_data=f"plant_{plant_id}")]
-    ]
-    
-    text = f"📞 **Бронирование: {plant_name}**\n\nНажмите кнопку для перехода в личку с ботом:"
-    
-    try:
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-    except:
-        try:
-            await query.message.delete()
-        except:
-            pass
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-async def start_booking(update: Update, context: ContextTypes.DEFAULT_TYPE, plant_id: str):
-    """Начинает процесс бронирования в личке"""
-    plants = load_plants()
-    bookings = load_bookings()
-    
-    if plant_id not in plants:
-        await update.message.reply_text("❌ Растение не найдено")
-        return
-    
-    if plant_id in bookings:
-        await update.message.reply_text("😔 Это растение уже забронировано!")
-        return
-    
-    plant_name = plants[plant_id]['name']
-    user_id = update.effective_user.id
-    
-    # Сохраняем состояние пользователя
-    user_states[user_id] = {"action": "booking", "plant_id": plant_id, "step": "name"}
-    
     await update.message.reply_text(
-        f"📞 **Бронирование: {plant_name}**\n\nВведите ваше имя:",
-        parse_mode=ParseMode.MARKDOWN
+        "🌸 Каталог наших растений:\n\n"
+        "✅ - В наличии\n"
+        "❌ - Нет в наличии\n\n"
+        "Выберите растение для просмотра:",
+        reply_markup=reply_markup
     )
 
-async def handle_admin_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начинает добавление растения"""
+async def handle_plant_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора растения из каталога"""
     query = update.callback_query
-    user_id = update.effective_user.id
+    await query.answer()
     
-    if not is_admin(user_id):
-        await query.answer("❌ Нет прав")
+    plant_id = query.data.split('_')[1]
+    plants = load_plants()
+    
+    if plant_id not in plants:
+        await query.edit_message_text("❌ Растение не найдено!")
         return
     
-    user_states[user_id] = {"action": "add_plant", "step": "name"}
+    plant = plants[plant_id]
     
-    try:
-        await query.edit_message_text("➕ **Добавление растения**\n\nВведите название:", parse_mode=ParseMode.MARKDOWN)
-    except:
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="➕ **Добавление растения**\n\nВведите название:",
-            parse_mode=ParseMode.MARKDOWN
+    # Формирование сообщения о растении
+    message_text = f"🌸 **{plant['name']}**\n\n"
+    message_text += f"📝 Описание: {plant['description']}\n"
+    message_text += f"💰 Цена: {plant['price']}₽\n"
+    message_text += f"📦 В наличии: {plant['quantity']} шт.\n"
+    
+    # Создание кнопок
+    keyboard = []
+    if plant['quantity'] > 0:
+        keyboard.append([InlineKeyboardButton("🛒 Забронировать", callback_data=f"book_{plant_id}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад к каталогу", callback_data="back_to_catalog")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Отправка фото, если есть
+    if 'photo_file_id' in plant:
+        try:
+            await query.edit_message_media(
+                media=query.message.photo[0].file_id if query.message.photo else None
+            )
+            await query.message.reply_photo(
+                photo=plant['photo_file_id'],
+                caption=message_text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        except:
+            await query.edit_message_text(
+                message_text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+    else:
+        await query.edit_message_text(
+            message_text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
         )
 
-async def handle_admin_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает брони"""
+async def start_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало процесса бронирования"""
     query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    plant_id = query.data.split('_')[1]
+    plants = load_plants()
+    
+    if plant_id not in plants:
+        await query.edit_message_text("❌ Растение не найдено!")
+        return
+    
+    plant = plants[plant_id]
+    
+    if plant['quantity'] <= 0:
+        await query.edit_message_text("❌ К сожалению, это растение закончилось!")
+        return
+    
+    # Сохранение данных о бронировании
+    temp_booking_data[user_id] = {
+        'plant_id': plant_id,
+        'plant_name': plant['name'],
+        'price': plant['price']
+    }
+    
+    user_states[user_id] = WAITING_BOOKING_NAME
+    
+    await query.edit_message_text(
+        f"🛒 Бронирование: {plant['name']}\n\n"
+        f"💰 Цена: {plant['price']}₽\n\n"
+        "👤 Пожалуйста, введите ваше имя:"
+    )
+
+async def handle_booking_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода имени при бронировании"""
     user_id = update.effective_user.id
     
-    if not is_admin(user_id):
-        await query.answer("❌ Нет прав")
+    if user_id not in user_states or user_states[user_id] != WAITING_BOOKING_NAME:
+        return
+    
+    name = update.message.text.strip()
+    if len(name) < 2:
+        await update.message.reply_text("❌ Пожалуйста, введите корректное имя (минимум 2 символа):")
+        return
+    
+    temp_booking_data[user_id]['customer_name'] = name
+    user_states[user_id] = WAITING_BOOKING_PHONE
+    
+    await update.message.reply_text(
+        "📞 Теперь введите ваш номер телефона для связи:"
+    )
+
+async def handle_booking_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода телефона и завершение бронирования"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_states or user_states[user_id] != WAITING_BOOKING_PHONE:
+        return
+    
+    phone = update.message.text.strip()
+    if len(phone) < 10:
+        await update.message.reply_text("❌ Пожалуйста, введите корректный номер телефона:")
+        return
+    
+    # Завершение бронирования
+    booking_data = temp_booking_data[user_id]
+    booking_data['customer_phone'] = phone
+    booking_data['user_id'] = user_id
+    booking_data['username'] = update.effective_user.username or "Не указан"
+    booking_data['booking_time'] = datetime.now().isoformat()
+    booking_data['status'] = 'pending'
+    
+    # Сохранение бронирования
+    bookings = load_bookings()
+    booking_id = str(len(bookings) + 1)
+    bookings[booking_id] = booking_data
+    
+    if save_bookings(bookings):
+        # Уменьшение количества растения
+        plants = load_plants()
+        plant_id = booking_data['plant_id']
+        if plant_id in plants:
+            plants[plant_id]['quantity'] -= 1
+            save_plants(plants)
+        
+        # Очистка временных данных
+        del user_states[user_id]
+        del temp_booking_data[user_id]
+        
+        await update.message.reply_text(
+            f"✅ Бронирование успешно создано!\n\n"
+            f"🆔 Номер заказа: {booking_id}\n"
+            f"🌸 Растение: {booking_data['plant_name']}\n"
+            f"💰 Цена: {booking_data['price']}₽\n\n"
+            f"📞 С вами свяжутся по номеру: {phone}\n\n"
+            f"Администратор обработает ваш заказ в ближайшее время."
+        )
+        
+        # Уведомление администраторов
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🔔 Новое бронирование!\n\n"
+                         f"🆔 Заказ #{booking_id}\n"
+                         f"👤 Клиент: {booking_data['customer_name']}\n"
+                         f"📞 Телефон: {booking_data['customer_phone']}\n"
+                         f"🌸 Растение: {booking_data['plant_name']}\n"
+                         f"💰 Цена: {booking_data['price']}₽"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления админу {admin_id}: {e}")
+    else:
+        await update.message.reply_text("❌ Ошибка при сохранении бронирования. Попробуйте позже.")
+
+async def back_to_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возврат к каталогу"""
+    query = update.callback_query
+    await query.answer()
+    
+    plants = load_plants()
+    
+    if not plants:
+        await query.edit_message_text("🌱 Каталог пуст. Растения пока не добавлены.")
+        return
+    
+    keyboard = []
+    for plant_id, plant_data in plants.items():
+        availability = "✅" if plant_data.get('quantity', 0) > 0 else "❌"
+        button_text = f"{availability} {plant_data['name']} - {plant_data['price']}₽"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"plant_{plant_id}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "🌸 Каталог наших растений:\n\n"
+        "✅ - В наличии\n"
+        "❌ - Нет в наличии\n\n"
+        "Выберите растение для просмотра:",
+        reply_markup=reply_markup
+    )
+
+async def add_plant_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало добавления нового растения"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой операции.")
+        return
+    
+    user_states[user_id] = WAITING_PLANT_NAME
+    temp_plant_data[user_id] = {}
+    
+    await update.message.reply_text("🌱 Добавление нового растения\n\n📝 Введите название растения:")
+
+async def handle_plant_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода названия растения"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_states or user_states[user_id] != WAITING_PLANT_NAME:
+        return
+    
+    name = update.message.text.strip()
+    if len(name) < 2:
+        await update.message.reply_text("❌ Название должно содержать минимум 2 символа. Попробуйте снова:")
+        return
+    
+    temp_plant_data[user_id]['name'] = name
+    user_states[user_id] = WAITING_PLANT_DESCRIPTION
+    
+    await update.message.reply_text("📋 Введите описание растения:")
+
+async def handle_plant_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода описания растения"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_states or user_states[user_id] != WAITING_PLANT_DESCRIPTION:
+        return
+    
+    description = update.message.text.strip()
+    if len(description) < 10:
+        await update.message.reply_text("❌ Описание должно содержать минимум 10 символов. Попробуйте снова:")
+        return
+    
+    temp_plant_data[user_id]['description'] = description
+    user_states[user_id] = WAITING_PLANT_PRICE
+    
+    await update.message.reply_text("💰 Введите цену растения (только число, без символов):")
+
+async def handle_plant_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода цены растения"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_states or user_states[user_id] != WAITING_PLANT_PRICE:
+        return
+    
+    try:
+        price = float(update.message.text.strip())
+        if price <= 0:
+            raise ValueError("Цена должна быть положительной")
+    except ValueError:
+        await update.message.reply_text("❌ Пожалуйста, введите корректную цену (например: 1500 или 1500.50):")
+        return
+    
+    temp_plant_data[user_id]['price'] = price
+    user_states[user_id] = WAITING_PLANT_QUANTITY
+    
+    await update.message.reply_text("📦 Введите количество растений в наличии:")
+
+async def handle_plant_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода количества растений"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_states or user_states[user_id] != WAITING_PLANT_QUANTITY:
+        return
+    
+    try:
+        quantity = int(update.message.text.strip())
+        if quantity < 0:
+            raise ValueError("Количество не может быть отрицательным")
+    except ValueError:
+        await update.message.reply_text("❌ Пожалуйста, введите корректное количество (целое число):")
+        return
+    
+    temp_plant_data[user_id]['quantity'] = quantity
+    user_states[user_id] = WAITING_PLANT_PHOTO
+    
+    await update.message.reply_text("📷 Отправьте фото растения или введите 'пропустить', чтобы добавить без фото:")
+
+async def handle_plant_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка фото растения и завершение добавления"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_states or user_states[user_id] != WAITING_PLANT_PHOTO:
+        return
+    
+    plant_data = temp_plant_data[user_id]
+    
+    # Обработка фото
+    if update.message.photo:
+        plant_data['photo_file_id'] = update.message.photo[-1].file_id
+    elif update.message.text and update.message.text.lower() == 'пропустить':
+        pass  # Фото не добавляется
+    else:
+        await update.message.reply_text("❌ Пожалуйста, отправьте фото или введите 'пропустить':")
+        return
+    
+    # Сохранение растения
+    plants = load_plants()
+    plant_id = str(len(plants) + 1)
+    plants[plant_id] = plant_data
+    
+    if save_plants(plants):
+        # Очистка временных данных
+        del user_states[user_id]
+        del temp_plant_data[user_id]
+        
+        await update.message.reply_text(
+            f"✅ Растение успешно добавлено!\n\n"
+            f"🌸 Название: {plant_data['name']}\n"
+            f"📋 Описание: {plant_data['description']}\n"
+            f"💰 Цена: {plant_data['price']}₽\n"
+            f"📦 Количество: {plant_data['quantity']} шт."
+        )
+    else:
+        await update.message.reply_text("❌ Ошибка при сохранении растения. Попробуйте позже.")
+
+async def manage_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Управление заказами (только для админов)"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ У вас нет прав для выполнения этой операции.")
         return
     
     bookings = load_bookings()
     
     if not bookings:
-        text = "📋 **Активных броней нет**"
-        keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="back_catalog")]]
-    else:
-        text = "📋 **АКТИВНЫЕ БРОНИ:**\n\n"
-        keyboard = []
-        
-        for plant_id, booking in bookings.items():
-            text += f"🪴 **{booking['plant_name']}**\n"
-            text += f"👤 {booking['user_name']}\n"
-            text += f"📱 {booking['user_phone']}\n\n"
-            
-            keyboard.append([
-                InlineKeyboardButton(f"✅ Подтвердить {booking['plant_name'][:15]}...", callback_data=f"confirm_{plant_id}"),
-                InlineKeyboardButton(f"❌ Отклонить", callback_data=f"reject_{plant_id}")
-            ])
-        
-        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_catalog")])
+        await update.message.reply_text("📋 Заказов пока нет.")
+        return
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Группировка заказов по статусу
+    pending_orders = []
+    confirmed_orders = []
+    rejected_orders = []
     
-    try:
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-    except:
-        try:
-            await query.message.delete()
-        except:
-            pass
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
+    for booking_id, booking_data in bookings.items():
+        status = booking_data.get('status', 'pending')
+        order_info = f"#{booking_id} - {booking_data['plant_name']} ({booking_data['customer_name']})"
+        
+        if status == 'pending':
+            pending_orders.append(order_info)
+        elif status == 'confirmed':
+            confirmed_orders.append(order_info)
+        elif status == 'rejected':
+            rejected_orders.append(order_info)
+    
+    message = "📋 **Управление заказами**\n\n"
+    
+    if pending_orders:
+        message += "⏳ **Ожидают обработки:**\n"
+        for order in pending_orders[:10]:  # Показываем максимум 10 заказов
+            message += f"• {order}\n"
+        message += "\n"
+    
+    if confirmed_orders:
+        message += "✅ **Подтверждённые:**\n"
+        for order in confirmed_orders[:5]:
+            message += f"• {order}\n"
+        message += "\n"
+    
+    if rejected_orders:
+        message += "❌ **Отклонённые:**\n"
+        for order in rejected_orders[:5]:
+            message += f"• {order}\n"
+        message += "\n"
+    
+    message += "Для подробной информации о заказе используйте команду:\n`/order_details <номер_заказа>`"
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает текстовые сообщения (для состояний)"""
+async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик текстовых сообщений"""
     user_id = update.effective_user.id
     text = update.message.text
     
-    if user_id not in user_states:
-        return
+    # Обработка состояний машины состояний
+    if user_id in user_states:
+        state = user_states[user_id]
+        
+        if state == WAITING_PLANT_NAME:
+            await handle_plant_name(update, context)
+            return
+        elif state == WAITING_PLANT_DESCRIPTION:
+            await handle_plant_description(update, context)
+            return
+        elif state == WAITING_PLANT_PRICE:
+            await handle_plant_price(update, context)
+            return
+        elif state == WAITING_PLANT_QUANTITY:
+            await handle_plant_quantity(update, context)
+            return
+        elif state == WAITING_PLANT_PHOTO:
+            await handle_plant_photo(update, context)
+            return
+        elif state == WAITING_BOOKING_NAME:
+            await handle_booking_name(update, context)
+            return
+        elif state == WAITING_BOOKING_PHONE:
+            await handle_booking_phone(update, context)
+            return
     
-    state = user_states[user_id]
-    
-    # Обработка добавления растения
-    if state["action"] == "add_plant":
-        if state["step"] == "name":
-            state["name"] = text
-            state["step"] = "price"
-            await update.message.reply_text("💰 Введите цену:")
-            
-        elif state["step"] == "price":
-            state["price"] = text
-            state["step"] = "description"
-            await update.message.reply_text("📝 Введите описание:")
-            
-        elif state["step"] == "description":
-            state["description"] = text
-            
-            # Сохраняем растение
-            plants = load_plants()
-            plant_id = f"plant_{len(plants) + 1}_{int(datetime.now().timestamp())}"
-            
-            plants[plant_id] = {
-                "name": state["name"],
-                "price": state["price"],
-                "description": state["description"],
-                "created_at": datetime.now().isoformat()
-            }
-            
-            save_plants(plants)
-            del user_states[user_id]
-            
-            await update.message.reply_text(
-                f"✅ **Растение добавлено!**\n\n🪴 {state['name']}\n💰 {state['price']}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-    
-    # Обработка бронирования
-    elif state["action"] == "booking":
-        if state["step"] == "name":
-            state["user_name"] = text
-            state["step"] = "phone"
-            await update.message.reply_text("📱 Введите телефон:")
-            
-        elif state["step"] == "phone":
-            state["user_phone"] = text
-            state["step"] = "comment"
-            await update.message.reply_text("💬 Комментарий (или напишите 'нет'):")
-            
-        elif state["step"] == "comment":
-            comment = text if text.lower() != "нет" else ""
-            plant_id = state["plant_id"]
-            
-            # Сохраняем бронь
-            plants = load_plants()
-            bookings = load_bookings()
-            
-            if plant_id in bookings:
-                await update.message.reply_text("😔 Растение уже забронировано!")
-                del user_states[user_id]
-                return
-            
-            bookings[plant_id] = {
-                "plant_name": plants[plant_id]["name"],
-                "plant_price": plants[plant_id]["price"],
-                "user_id": user_id,
-                "user_name": state["user_name"],
-                "user_phone": state["user_phone"],
-                "comment": comment,
-                "created_at": datetime.now().isoformat()
-            }
-            
-            save_bookings(bookings)
-            del user_states[user_id]
-            
-            # Уведомляем пользователя
-            await update.message.reply_text(
-                f"✅ **Заявка отправлена!**\n\n🪴 {plants[plant_id]['name']}\n👤 {state['user_name']}\n📱 {state['user_phone']}\n\nАдминистратор свяжется с вами!",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-            # Уведомляем админов
-            admin_text = f"🔔 **НОВАЯ БРОНЬ**\n\n🪴 {plants[plant_id]['name']}\n👤 {state['user_name']}\n📱 {state['user_phone']}\n💬 {comment or 'нет'}"
-            
-            for admin_id in ADMIN_IDS:
-                if admin_id > 0:
-                    try:
-                        await context.bot.send_message(admin_id, admin_text, parse_mode=ParseMode.MARKDOWN)
-                    except:
-                        pass
+    # Обработка команд через кнопки меню
+    if text == "📱 Каталог растений":
+        await show_catalog(update, context)
+    elif text == "➕ Добавить растение":
+        await add_plant_start(update, context)
+    elif text == "📋 Управление заказами":
+        await manage_orders(update, context)
+    elif text == "❌ Удалить растение":
+        if user_id in ADMIN_IDS:
+            await update.message.reply_text("🔧 Функция удаления растений в разработке.")
+        else:
+            await update.message.reply_text("❌ У вас нет прав для выполнения этой операции.")
+    else:
+        await update.message.reply_text(
+            "❓ Не понимаю эту команду. Используйте кнопки меню или команды:\n"
+            "/start - главное меню\n"
+            "/help - помощь"
+        )
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает все callback кнопки"""
+async def handle_photo_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик фото сообщений"""
+    user_id = update.effective_user.id
+    
+    if user_id in user_states and user_states[user_id] == WAITING_PLANT_PHOTO:
+        await handle_plant_photo(update, context)
+    else:
+        await update.message.reply_text("📷 Фото получено, но сейчас оно не нужно.")
+
+async def handle_callback_queries(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик callback запросов от инлайн-кнопок"""
     query = update.callback_query
-    await query.answer()
     data = query.data
     
-    if data == "back_catalog":
-        await show_catalog(update, context)
-    
-    elif data.startswith("plant_"):
-        plant_id = data.replace("plant_", "")
-        await show_plant(update, context, plant_id)
-    
+    if data.startswith("plant_"):
+        await handle_plant_selection(update, context)
     elif data.startswith("book_"):
-        plant_id = data.replace("book_", "")
-        await handle_booking_button(update, context, plant_id)
-    
-    elif data == "admin_add":
-        await handle_admin_add(update, context)
-    
-    elif data == "admin_bookings":
-        await handle_admin_bookings(update, context)
-    
-    elif data.startswith("confirm_"):
-        plant_id = data.replace("confirm_", "")
-        await confirm_booking(update, context, plant_id)
-    
-    elif data.startswith("reject_"):
-        plant_id = data.replace("reject_", "")
-        await reject_booking(update, context, plant_id)
-    
-    elif data.startswith("delete_"):
-        plant_id = data.replace("delete_", "")
-        await delete_plant(update, context, plant_id)
+        await start_booking(update, context)
+    elif data == "back_to_catalog":
+        await back_to_catalog(update, context)
+    else:
+        await query.answer("❌ Неизвестная команда")
 
-async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE, plant_id: str):
-    """Подтверждает бронь"""
-    if not is_admin(update.effective_user.id):
-        return
-    
-    bookings = load_bookings()
-    if plant_id not in bookings:
-        await update.callback_query.edit_message_text("❌ Бронь не найдена")
-        return
-    
-    booking = bookings[plant_id]
-    
-    # Уведомляем клиента
-    try:
-        await context.bot.send_message(
-            booking["user_id"],
-            f"✅ **БРОНЬ ПОДТВЕРЖДЕНА!**\n\n🪴 {booking['plant_name']}\n\nОжидаем вас в магазине!",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except:
-        pass
-    
-    await update.callback_query.edit_message_text(
-        f"✅ Бронь подтверждена!\n\n🪴 {booking['plant_name']}\n👤 {booking['user_name']}\n\nКлиент уведомлен."
-    )
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда помощи"""
+    help_text = """
+🌸 **Помощь по боту Polly's Garden**
 
-async def reject_booking(update: Update, context: ContextTypes.DEFAULT_TYPE, plant_id: str):
-    """Отклоняет бронь"""
-    if not is_admin(update.effective_user.id):
-        return
-    
-    bookings = load_bookings()
-    if plant_id not in bookings:
-        await update.callback_query.edit_message_text("❌ Бронь не найдена")
-        return
-    
-    booking = bookings[plant_id]
-    del bookings[plant_id]
-    save_bookings(bookings)
-    
-    # Уведомляем клиента
-    try:
-        await context.bot.send_message(
-            booking["user_id"],
-            f"😔 К сожалению, ваша бронь отклонена\n\n🪴 {booking['plant_name']}\n\nПосмотрите другие растения в каталоге.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except:
-        pass
-    
-    await update.callback_query.edit_message_text(
-        f"❌ Бронь отклонена\n\n🪴 {booking['plant_name']}\n👤 {booking['user_name']}\n\nКлиент уведомлен."
-    )
+**Для всех пользователей:**
+• `/start` - Главное меню
+• `📱 Каталог растений` - Просмотр всех растений
+• Выберите растение из каталога для бронирования
 
-async def delete_plant(update: Update, context: ContextTypes.DEFAULT_TYPE, plant_id: str):
-    """Удаляет растение"""
-    if not is_admin(update.effective_user.id):
-        return
+**Для администраторов:**
+• `➕ Добавить растение` - Добавление нового растения
+• `📋 Управление заказами` - Просмотр всех заказов
+• `/order_details <номер>` - Подробности о заказе
+
+**Процесс бронирования:**
+1. Выберите растение из каталога
+2. Нажмите "🛒 Забронировать"
+3. Введите ваше имя
+4. Введите номер телефона
+5. Ожидайте звонка администратора
+
+❓ **Вопросы?** Обратитесь к администратору.
+    """
     
-    plants = load_plants()
-    bookings = load_bookings()
-    
-    if plant_id not in plants:
-        await update.callback_query.edit_message_text("❌ Растение не найдено")
-        return
-    
-    if plant_id in bookings:
-        await update.callback_query.edit_message_text("❌ Нельзя удалить - есть активная бронь!")
-        return
-    
-    plant_name = plants[plant_id]["name"]
-    del plants[plant_id]
-    save_plants(plants)
-    
-    await update.callback_query.edit_message_text(f"✅ Растение '{plant_name}' удалено")
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 def main():
-    """Запуск бота"""
+    """Основная функция запуска бота"""
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN не установлен!")
         return
     
-    app = Application.builder().token(BOT_TOKEN).build()
+    if not ADMIN_IDS:
+        logger.warning("ADMIN_IDS не установлены!")
     
-    # Простые обработчики
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("catalog", show_catalog))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # Создание приложения
+    application = Application.builder().token(BOT_TOKEN).build()
     
-    logger.info("🤖 Простой бот запущен!")
-    app.run_polling()
+    # Регистрация обработчиков
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CallbackQueryHandler(handle_callback_queries))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo_messages))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
+    
+    # Запуск бота
+    logger.info("Бот запущен!")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()

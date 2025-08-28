@@ -68,6 +68,8 @@ def is_admin(user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Приветствие и главное меню"""
     user = update.effective_user
+    chat_id = update.effective_chat.id
+    logger.info(f"Команда /start от пользователя {user.id} в чате {chat_id}")
     
     if is_admin(user.id):
         keyboard = [

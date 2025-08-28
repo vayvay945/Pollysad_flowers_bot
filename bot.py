@@ -65,24 +65,32 @@ def is_admin(user_id):
 
 # ========== ОСНОВНЫЕ КОМАНДЫ ==========
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Приветствие и показ каталога"""
+async def start_unified(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Единый обработчик команды /start для всех типов чатов"""
+    chat_type = update.effective_chat.type
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id if update.effective_user else None
-    chat_type = update.effective_chat.type
     
     logger.info(f"Команда /start от пользователя {user_id} в чате {chat_id} (тип: {chat_type})")
     
     # Логируем ID канала для настройки
     if chat_type == ChatType.CHANNEL:
         logger.info(f"🔥 ID КАНАЛА: {chat_id} - добавьте это в переменную CHANNEL_ID")
-    
-    # В канале сразу показываем каталог
-    if chat_type == ChatType.CHANNEL:
+        # В канале всегда показываем каталог
         await show_catalog_message(update, context)
+        
+    elif chat_type == ChatType.PRIVATE:
+        # В личке проверяем параметры
+        if context.args and context.args[0].startswith("book_"):
+            # Начинаем процесс бронирования
+            return await handle_booking_start(update, context)
+        else:
+            # Показываем меню
+            await show_private_menu(update, context)
+    
     else:
-        # В личке показываем меню
-        await show_private_menu(update, context)
+        # Группы и супергруппы
+        await show_catalog_message(update, context)
 
 async def show_private_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает меню в личных сообщениях"""
@@ -108,16 +116,34 @@ async def show_catalog_message(update: Update, context: ContextTypes.DEFAULT_TYP
     
     if not plants:
         message_text += "😔 К сожалению, сейчас растений нет в наличии.\n\nСледите за обновлениями!"
+        keyboard = []
+        
+        # ВАЖНО: Админские кнопки показываем всегда, даже если каталог пустой
+        if update.effective_user and is_admin(update.effective_user.id):
+            keyboard = [
+                [InlineKeyboardButton("➕ Добавить растение", callback_data="admin_add_plant")],
+                [InlineKeyboardButton("📋 Активные брони", callback_data="admin_bookings")]
+            ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         
         if update.callback_query:
-            await update.callback_query.edit_message_text(message_text, parse_mode=ParseMode.MARKDOWN)
+            await update.callback_query.edit_message_text(
+                message_text, 
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
         elif update.message:
-            await update.message.reply_text(message_text, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                message_text, 
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
         else:
-            # Если нет ни callback ни message, отправляем в чат напрямую
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=message_text,
+                reply_markup=reply_markup,
                 parse_mode=ParseMode.MARKDOWN
             )
         return
@@ -277,10 +303,11 @@ async def start_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN
     )
 
-async def handle_start_parameter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает параметры команды /start"""
+async def handle_booking_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает начало бронирования из deep link"""
     if not context.args:
-        return await show_private_menu(update, context)
+        await show_private_menu(update, context)
+        return ConversationHandler.END
     
     param = context.args[0]
     
@@ -290,7 +317,8 @@ async def handle_start_parameter(update: Update, context: ContextTypes.DEFAULT_T
         
         if plant_id not in plants:
             await update.message.reply_text("❌ Растение не найдено")
-            return
+            await show_catalog_message(update, context)
+            return ConversationHandler.END
         
         # Проверяем, не забронировано ли уже
         bookings = load_bookings()
@@ -299,7 +327,8 @@ async def handle_start_parameter(update: Update, context: ContextTypes.DEFAULT_T
                 "😔 Извините, это растение уже забронировано!\n\n"
                 "Посмотрите другие доступные растения в каталоге."
             )
-            return await show_catalog_message(update, context)
+            await show_catalog_message(update, context)
+            return ConversationHandler.END
         
         context.user_data['booking_plant_id'] = plant_id
         plant_name = plants[plant_id]['name']
@@ -313,7 +342,8 @@ async def handle_start_parameter(update: Update, context: ContextTypes.DEFAULT_T
         return BOOKING_NAME
     
     # Если параметр неизвестный, показываем обычное меню
-    return await show_private_menu(update, context)
+    await show_private_menu(update, context)
+    return ConversationHandler.END
 
 # ========== ПРОЦЕСС БРОНИРОВАНИЯ В ЛИЧКЕ ==========
 
@@ -802,7 +832,7 @@ def main():
     # Обработчик для бронирования (только в личке)
     booking_handler = ConversationHandler(
         entry_points=[
-            CommandHandler("start", handle_start_parameter, filters.ChatType.PRIVATE)
+            MessageHandler(filters.Regex(r'^/start book_') & filters.ChatType.PRIVATE, handle_booking_start)
         ],
         states={
             BOOKING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, booking_get_name)],
@@ -812,9 +842,10 @@ def main():
         fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
     )
     
-    # Основные команды
-    application.add_handler(CommandHandler("start", start, filters.ChatType.CHANNEL))
-    application.add_handler(CommandHandler("start", handle_start_parameter, filters.ChatType.PRIVATE))
+    # ЕДИНЫЙ обработчик команды /start
+    application.add_handler(CommandHandler("start", start_unified))
+    
+    # Другие команды
     application.add_handler(CommandHandler("catalog", catalog_command))
     application.add_handler(CommandHandler("info", info_command))
     

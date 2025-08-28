@@ -305,7 +305,9 @@ async def start_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_booking_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает начало бронирования из deep link"""
-    if not context.args:
+    # Проверяем что это именно deep link с параметрами бронирования
+    if not context.args or not any(arg.startswith("book_") for arg in context.args):
+        # Если это обычный /start в личке без параметров бронирования
         await show_private_menu(update, context)
         return ConversationHandler.END
     
@@ -829,10 +831,11 @@ def main():
         fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
     )
     
-    # Обработчик для бронирования (только в личке)
+    # Обработчик для бронирования - ТОЛЬКО для deep links с параметрами!
     booking_handler = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(r'^/start book_') & filters.ChatType.PRIVATE, handle_booking_start)
+            CommandHandler("start", handle_booking_start, 
+                          filters.ChatType.PRIVATE & filters.Regex(r'.* book_.*'))
         ],
         states={
             BOOKING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, booking_get_name)],
@@ -842,21 +845,19 @@ def main():
         fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
     )
     
-    # ЕДИНЫЙ обработчик команды /start
+    # Основные команды
     application.add_handler(CommandHandler("start", start_unified))
-    
-    # Другие команды
     application.add_handler(CommandHandler("catalog", catalog_command))
     application.add_handler(CommandHandler("info", info_command))
     
-    # Обработчики диалогов
-    application.add_handler(add_plant_handler)
+    # ВАЖНО: ConversationHandlers должны быть ПОСЛЕ основных команд но ДО общих callback
     application.add_handler(booking_handler)
+    application.add_handler(add_plant_handler)
     
-    # Callback обработчики
+    # Callback обработчики (кнопки) - ПОСЛЕДНИМИ
     application.add_handler(CallbackQueryHandler(handle_callback_query))
     
-    # Обработчик всех остальных сообщений
+    # Обработчик всех остальных сообщений - САМЫЙ ПОСЛЕДНИЙ
     application.add_handler(MessageHandler(filters.TEXT, handle_channel_message))
     
     # Запуск бота

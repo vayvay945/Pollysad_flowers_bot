@@ -2,7 +2,7 @@ import logging
 import json
 import os
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from telegram.constants import ParseMode, ChatType
 
@@ -68,7 +68,7 @@ def is_admin(user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Приветствие и показ каталога"""
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
+    user_id = update.effective_user.id if update.effective_user else None
     chat_type = update.effective_chat.type
     
     logger.info(f"Команда /start от пользователя {user_id} в чате {chat_id} (тип: {chat_type})")
@@ -87,6 +87,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_private_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает меню в личных сообщениях"""
     user = update.effective_user
+    
+    if not user:
+        logger.error("Нет информации о пользователе")
+        return
     
     welcome_text = f"🌿 Добро пожаловать в наш цветочный магазин, {user.first_name}!"
     
@@ -193,7 +197,7 @@ async def show_plant_details(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard.append([InlineKeyboardButton("⬅️ Назад к каталогу", callback_data="back_to_catalog")])
     
     # Админские кнопки
-    if is_admin(update.effective_user.id):
+    if update.effective_user and is_admin(update.effective_user.id):
         keyboard.append([InlineKeyboardButton("🗑 Удалить растение", callback_data=f"admin_delete_{plant_id}")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -209,7 +213,8 @@ async def show_plant_details(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 ),
                 reply_markup=reply_markup
             )
-        except:
+        except Exception as e:
+            logger.error(f"Ошибка при отправке фото: {e}")
             # Если не получается отредактировать медиа, отправляем текстом
             await query.edit_message_text(
                 message,
@@ -742,8 +747,9 @@ async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_T
     # Логируем для получения ID канала
     chat_id = update.effective_chat.id
     chat_type = update.effective_chat.type
+    user_id = update.effective_user.id if update.effective_user else None
     
-    logger.info(f"Сообщение в {chat_type} {chat_id}: {update.message.text}")
+    logger.info(f"Сообщение от {user_id} в {chat_type} {chat_id}: {update.message.text}")
     
     # В каналах отвечаем только на команды
     if chat_type == ChatType.CHANNEL and update.message.text:

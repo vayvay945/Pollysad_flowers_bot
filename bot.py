@@ -111,8 +111,15 @@ async def show_catalog_message(update: Update, context: ContextTypes.DEFAULT_TYP
         
         if update.callback_query:
             await update.callback_query.edit_message_text(message_text, parse_mode=ParseMode.MARKDOWN)
-        else:
+        elif update.message:
             await update.message.reply_text(message_text, parse_mode=ParseMode.MARKDOWN)
+        else:
+            # Если нет ни callback ни message, отправляем в чат напрямую
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=message_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
         return
     
     # Создаем кнопки для каждого растения
@@ -157,9 +164,17 @@ async def show_catalog_message(update: Update, context: ContextTypes.DEFAULT_TYP
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )
-    else:
+    elif update.message:
         await update.message.reply_text(
             message_text, 
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        # Если нет ни callback ни message, отправляем в чат напрямую
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=message_text,
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN
         )

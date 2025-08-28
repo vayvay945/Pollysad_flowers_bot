@@ -13,11 +13,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== КОНФИГУРАЦИЯ (ОБЯЗАТЕЛЬНО ЗАПОЛНИТЕ!) ==========
+# ========== КОНФИГУРАЦИЯ ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # ID администраторов (получить можно у @userinfobot)
-ADMIN_IDS = [int(os.getenv("ADMIN_ID1")), int(os.getenv("ADMIN_ID2"))]
+ADMIN_IDS = [
+    int(os.getenv("ADMIN_ID1", "0")), 
+    int(os.getenv("ADMIN_ID2", "0"))
+]
 
 # ID канала/группы где работает бот (получить можно добавив бота в канал)
 CHANNEL_ID = -1001234567890  # Замените на реальный ID канала
@@ -370,13 +373,13 @@ async def add_plant_get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает нажатия на inline кнопки"""
     query = update.callback_query
+    await query.answer()  # Обязательно отвечаем на callback
     
     if query.data.startswith("show_plant_"):
         await show_plant_details(update, context)
     elif query.data.startswith("book_plant_"):
         return await start_booking(update, context)
     elif query.data == "back_to_catalog":
-        await query.answer()
         await show_catalog_inline(query)
     elif query.data.startswith("confirm_booking_"):
         await confirm_booking(update, context)
